@@ -33,7 +33,7 @@ def process_artist(artist_slug: str):
         title = parts[-1].replace('.html', '')
         artist = parts[-2] if len(parts) >= 2 else artist_slug
         try:
-            lyrics = scrape_lyrics(u)
+            lyrics, year = scrape_lyrics(u)
         except Exception as e:
             logging.error('Error fetching %s - %s: %s', artist, title, e)
             continue
@@ -49,7 +49,8 @@ def process_artist(artist_slug: str):
             lang_code,
             os.path.join(os.path.dirname(__file__), 'data'),
             artist,
-            title
+            title,
+            year
         )
         logging.info('Saved lyrics to %s (lang=%s)', out_file, lang_code)
         time.sleep(1)
