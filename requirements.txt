@@ -115,3 +115,4 @@ widgetsnbextension==4.0.15
 spacy==3.8.2
 nltk==3.9.1
 wordcloud==1.9.4
+stanza==1.12.0
