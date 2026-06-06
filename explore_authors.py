@@ -29,6 +29,13 @@ except Exception:
     textstat = None
 
 try:
+    import gensim
+    from gensim import corpora
+    from gensim.models import LdaModel
+except Exception:
+    gensim = None
+
+try:
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
 except Exception:
@@ -367,6 +374,51 @@ def rhyme_scheme(lines: List[str], suffix_len: int = 3):
     return ''.join(scheme)
 
 
+def rhythm_metrics_for_text(text: str):
+    # syllables per line, variance, avg
+    lines = [l for l in text.splitlines() if l.strip()]
+    syls = []
+    for l in lines:
+        toks = tokenize(clean_text(l))
+        s = sum(syllables_in_word(t) for t in toks)
+        syls.append(s)
+    import numpy as np
+    if not syls:
+        return {'lines':0,'avg_syl_per_line':0,'var_syl_per_line':0,'median_syl_per_line':0}
+    return {'lines': len(syls), 'avg_syl_per_line': float(np.mean(syls)), 'var_syl_per_line': float(np.var(syls)), 'median_syl_per_line': float(np.median(syls))}
+
+
+def rhyme_density(text: str, suffix_len: int = 3):
+    # proportion of lines that share an ending with at least one other line
+    lines = [clean_text(l) for l in text.splitlines() if l.strip()]
+    endings = [ (l.split()[-1][-suffix_len:] if l.split() else '') for l in lines]
+    c = Counter(endings)
+    shared = sum(1 for e in endings if c.get(e,0) > 1)
+    return shared / len(lines) if lines else 0
+
+
+def plot_rhythm_and_rhyme(per_a, per_b, texts_a, texts_b, out_prefix):
+    try:
+        import pandas as pd
+        rows = []
+        for path_row, text in zip(per_a, texts_a):
+            rm = rhythm_metrics_for_text(text)
+            rd = rhyme_density(text)
+            rows.append({'file': path_row.get('file',''), 'avg_syl_per_line': rm['avg_syl_per_line'], 'var_syl_per_line': rm['var_syl_per_line'], 'rhyme_density': rd})
+        for path_row, text in zip(per_b, texts_b):
+            rm = rhythm_metrics_for_text(text)
+            rd = rhyme_density(text)
+            rows.append({'file': path_row.get('file',''), 'avg_syl_per_line': rm['avg_syl_per_line'], 'var_syl_per_line': rm['var_syl_per_line'], 'rhyme_density': rd})
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            plt.figure(figsize=(10,6))
+            sns.scatterplot(x='var_syl_per_line', y='rhyme_density', data=df)
+            plt.title('Rhythm variance vs Rhyme density per file')
+            plt.tight_layout(); plt.savefig(f'{out_prefix}_rhythm_rhyme_scatter.png'); plt.close()
+    except Exception:
+        pass
+
+
 def sentiment_score(texts: List[str]):
     all_text = '\n'.join(texts)
     if _vader:
@@ -673,6 +725,115 @@ def find_author_paths(root_data: str, language: str, author_name: str) -> List[s
     return matches
 
 
+def build_topic_model(texts: List[str], num_topics: int = 6):
+    if not gensim:
+        return None
+    docs = [tokenize(clean_text(t)) for t in texts]
+    dictionary = corpora.Dictionary(docs)
+    corpus = [dictionary.doc2bow(d) for d in docs]
+    if not corpus:
+        return None
+    lda = LdaModel(corpus=corpus, id2word=dictionary, num_topics=num_topics, random_state=42, passes=5)
+    topics = lda.print_topics(num_words=8)
+    return {'model': lda, 'dictionary': dictionary, 'corpus': corpus, 'topics': topics}
+
+
+def train_classifier(paths_a: List[str], paths_b: List[str], out_prefix: str):
+    # Build dataset per-file and train simple logistic regression on TF-IDF
+    docs = []
+    labels = []
+    files = []
+    for p in paths_a:
+        if os.path.isdir(p):
+            for root, _, fns in os.walk(p):
+                for fn in fns:
+                    if fn.lower().endswith('.txt'):
+                        fp = os.path.join(root, fn)
+                        with open(fp, 'r', encoding='utf-8') as f:
+                            docs.append(f.read())
+                        labels.append(0)
+                        files.append(os.path.relpath(fp))
+        elif os.path.isfile(p):
+            with open(p, 'r', encoding='utf-8') as f:
+                docs.append(f.read())
+            labels.append(0)
+            files.append(os.path.relpath(p))
+    for p in paths_b:
+        if os.path.isdir(p):
+            for root, _, fns in os.walk(p):
+                for fn in fns:
+                    if fn.lower().endswith('.txt'):
+                        fp = os.path.join(root, fn)
+                        with open(fp, 'r', encoding='utf-8') as f:
+                            docs.append(f.read())
+                        labels.append(1)
+                        files.append(os.path.relpath(fp))
+        elif os.path.isfile(p):
+            with open(p, 'r', encoding='utf-8') as f:
+                docs.append(f.read())
+            labels.append(1)
+            files.append(os.path.relpath(p))
+    if not docs or not TfidfVectorizer:
+        return None
+    from sklearn.model_selection import train_test_split
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import classification_report, confusion_matrix
+    vec = TfidfVectorizer(stop_words='english', max_features=5000)
+    X = vec.fit_transform(docs)
+    X_train, X_test, y_train, y_test = train_test_split(X, labels, test_size=0.3, random_state=42, stratify=labels if len(set(labels))>1 else None)
+    clf = LogisticRegression(max_iter=1000)
+    try:
+        clf.fit(X_train, y_train)
+        preds = clf.predict(X_test)
+        report = classification_report(y_test, preds, output_dict=True)
+        # save report
+        import json
+        with open(f'{out_prefix}_classifier_report.json', 'w', encoding='utf-8') as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+        return {'model': clf, 'vectorizer': vec, 'report': report}
+    except Exception:
+        return None
+
+
+def build_fingerprint(stats: dict):
+    # select numeric features and normalize simply
+    keys = ['total_words','unique_words','avg_word_len','avg_sent_len','type_token_ratio','avg_syll_per_word']
+    vec = [float(stats.get(k,0)) for k in keys]
+    # simple scaling
+    smax = max(vec) if vec else 1.0
+    if smax == 0:
+        smax = 1.0
+    norm = [v / smax for v in vec]
+    return dict(zip(keys, norm))
+
+
+def plot_radar(fingerprint_a: dict, fingerprint_b: dict, labels: List[str], out_path: str):
+    try:
+        import numpy as np
+        out_dir = os.path.dirname(out_path)
+        if out_dir and not os.path.exists(out_dir):
+            os.makedirs(out_dir, exist_ok=True)
+        vals_a = [fingerprint_a.get(l,0) for l in labels]
+        vals_b = [fingerprint_b.get(l,0) for l in labels]
+        angles = np.linspace(0, 2*np.pi, len(labels), endpoint=False).tolist()
+        vals_a += vals_a[:1]
+        vals_b += vals_b[:1]
+        angles += angles[:1]
+        import matplotlib.pyplot as plt
+        fig = plt.figure(figsize=(6,6))
+        ax = fig.add_subplot(111, polar=True)
+        ax.plot(angles, vals_a, label='A')
+        ax.fill(angles, vals_a, alpha=0.25)
+        ax.plot(angles, vals_b, label='B')
+        ax.fill(angles, vals_b, alpha=0.25)
+        ax.set_thetagrids(np.degrees(angles[:-1]), labels)
+        ax.set_ylim(0,1)
+        plt.legend()
+        plt.tight_layout(); plt.savefig(out_path); plt.close()
+    except Exception:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(description='Compare two authors (directories or files)')
     parser.add_argument('author_a', help='path to author A (dir/file) or author name')
@@ -680,6 +841,7 @@ def main():
     parser.add_argument('--data-root', default='data', help='root data folder')
     parser.add_argument('--language', default='PL', help='language folder to search when names provided')
     parser.add_argument('--out-prefix', default='compare', help='output prefix for plots')
+    parser.add_argument('--sample-files', type=int, default=5, help='number of files per author to compare (max 5)')
     args = parser.parse_args()
 
     def resolve(arg):
@@ -726,10 +888,278 @@ def main():
     export_csv(f"{args.out_prefix}_per_file_a.csv", per_a, fieldnames=['file','words','unique','avg_word_len','avg_sent_len','ttr'])
     export_csv(f"{args.out_prefix}_per_file_b.csv", per_b, fieldnames=['file','words','unique','avg_word_len','avg_sent_len','ttr'])
 
+
+def top_ngrams_for_file(fp: str, n: int = 2, top_k: int = 20):
+    try:
+        with open(fp, 'r', encoding='utf-8') as f:
+            txt = f.read()
+    except Exception:
+        return []
+    toks = tokenize(clean_text(txt))
+    c = Counter()
+    for i in range(len(toks)-n+1):
+        c[' '.join(toks[i:i+n])] += 1
+    return c.most_common(top_k)
+
+
+def plot_multiple_ngrams_for_author(paths: List[str], sample_n: int, out_prefix: str, author_label: str):
+    # gather files
+    files = []
+    for p in paths:
+        if os.path.isdir(p):
+            for root, _, fns in os.walk(p):
+                for fn in fns:
+                    if fn.lower().endswith('.txt'):
+                        files.append(os.path.join(root, fn))
+        elif os.path.isfile(p):
+            files.append(p)
+    files = sorted(files)[:max(0, min(sample_n, len(files)))]
+    # cap at 5
+    files = files[:5]
+    idx = 0
+    for fp in files:
+        base = os.path.splitext(os.path.basename(fp))[0]
+        # bigrams
+        bg = top_ngrams_for_file(fp, n=2, top_k=15)
+        if bg:
+            labels = [t for t,_ in bg]
+            vals = [c for _,c in bg]
+            plt.figure(figsize=(8,5))
+            sns.barplot(x=vals, y=labels)
+            plt.title(f'{author_label} - {base} top bigrams')
+            plt.tight_layout(); plt.savefig(f'{out_prefix}_{author_label}_file{idx}_bigrams.png'); plt.close()
+        # trigrams
+        tg = top_ngrams_for_file(fp, n=3, top_k=15)
+        if tg:
+            labels = [t for t,_ in tg]
+            vals = [c for _,c in tg]
+            plt.figure(figsize=(8,5))
+            sns.barplot(x=vals, y=labels)
+            plt.title(f'{author_label} - {base} top trigrams')
+            plt.tight_layout(); plt.savefig(f'{out_prefix}_{author_label}_file{idx}_trigrams.png'); plt.close()
+        idx += 1
+
+
+def plot_combined_ngrams(paths_a: List[str], paths_b: List[str], sample_n: int, out_prefix: str):
+    # select files
+    def gather(paths):
+        files = []
+        for p in paths:
+            if os.path.isdir(p):
+                for root, _, fns in os.walk(p):
+                    for fn in fns:
+                        if fn.lower().endswith('.txt'):
+                            files.append(os.path.join(root, fn))
+            elif os.path.isfile(p):
+                files.append(p)
+        return sorted(files)[:sample_n][:5]
+    fa = gather(paths_a)
+    fb = gather(paths_b)
+    # pad to length 5
+    while len(fa) < 5:
+        fa.append(None)
+    while len(fb) < 5:
+        fb.append(None)
+    # create figure with 5 rows, 2 cols per author group? We'll do 5 rows x 2 cols (left=bigram right=trigram) for A, then separate for B in separate figure
+    plt.figure(figsize=(16, 20))
+    row = 0
+    for i in range(5):
+        for col, n in enumerate([2,3]):
+            plt.subplot(5,2,row*2 + col + 1)
+            fp = fa[i]
+            if not fp:
+                plt.axis('off')
+                continue
+            ng = top_ngrams_for_file(fp, n=n, top_k=12)
+            labels = [t for t,_ in ng]
+            vals = [c for _,c in ng]
+            sns.barplot(x=vals, y=labels, palette='tab20')
+            plt.title(f'A {os.path.basename(fp)} - {n}-grams')
+        row += 1
+    plt.tight_layout()
+    plt.savefig(f'{out_prefix}_combined_A_5files_ngrams.png')
+    plt.close()
+
+
+def plot_single_figure_both_authors(paths_a: List[str], paths_b: List[str], sample_n: int, out_prefix: str):
+    """Create a single figure with 5 rows and 4 columns: for each of up to 5 files,
+    show A-bigrams, A-trigrams, B-bigrams, B-trigrams side-by-side. Include file base name and word count in titles."""
+    def gather(paths):
+        files = []
+        for p in paths:
+            if os.path.isdir(p):
+                for root, _, fns in os.walk(p):
+                    for fn in fns:
+                        if fn.lower().endswith('.txt'):
+                            files.append(os.path.join(root, fn))
+            elif os.path.isfile(p):
+                files.append(p)
+        return sorted(files)[:sample_n][:5]
+
+    fa = gather(paths_a)
+    fb = gather(paths_b)
+    # pad
+    while len(fa) < 5:
+        fa.append(None)
+    while len(fb) < 5:
+        fb.append(None)
+
+    fig, axes = plt.subplots(nrows=5, ncols=4, figsize=(20, 22))
+    for i in range(5):
+        for j, (author_files, label) in enumerate(((fa, 'A'), (fb, 'B'))):
+            fp = author_files[i]
+            if not fp:
+                # turn off both subplots for missing file
+                axes[i, j*2].axis('off')
+                axes[i, j*2+1].axis('off')
+                continue
+            base = os.path.splitext(os.path.basename(fp))[0]
+            try:
+                with open(fp, 'r', encoding='utf-8') as f:
+                    txt = f.read()
+            except Exception:
+                txt = ''
+            tokens = tokenize(clean_text(txt))
+            wc = len(tokens)
+            # bigrams
+            bg = top_ngrams_for_file(fp, n=2, top_k=10)
+            if bg:
+                labels = [t for t,_ in bg]
+                vals = [c for _,c in bg]
+                sns.barplot(x=vals, y=labels, ax=axes[i, j*2], palette='tab10')
+                axes[i, j*2].set_title(f'{label} {base} (words:{wc})\nBigrams')
+            else:
+                axes[i, j*2].axis('off')
+            # trigrams
+            tg = top_ngrams_for_file(fp, n=3, top_k=10)
+            if tg:
+                labels = [t for t,_ in tg]
+                vals = [c for _,c in tg]
+                sns.barplot(x=vals, y=labels, ax=axes[i, j*2+1], palette='tab20')
+                axes[i, j*2+1].set_title(f'{label} {base} (words:{wc})\nTrigrams')
+            else:
+                axes[i, j*2+1].axis('off')
+
+    plt.tight_layout()
+    out_dir = os.path.dirname(out_prefix)
+    if out_dir and not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+    outp = f'{out_prefix}_single_comparison_5x10.png'
+    plt.savefig(outp, bbox_inches='tight')
+    plt.close()
+    print('Saved combined single figure:', outp)
+
+    plt.figure(figsize=(16,20))
+    row = 0
+    for i in range(5):
+        for col, n in enumerate([2,3]):
+            plt.subplot(5,2,row*2 + col + 1)
+            fp = fb[i]
+            if not fp:
+                plt.axis('off')
+                continue
+            ng = top_ngrams_for_file(fp, n=n, top_k=12)
+            labels = [t for t,_ in ng]
+            vals = [c for _,c in ng]
+            sns.barplot(x=vals, y=labels, palette='tab20')
+            plt.title(f'B {os.path.basename(fp)} - {n}-grams')
+        row += 1
+    plt.tight_layout()
+    plt.savefig(f'{out_prefix}_combined_B_5files_ngrams.png')
+    plt.close()
+
+
     # TF-IDF summary
     if tfidf:
         rows = [{'metric':'cosine','value':tfidf['cosine']}]
         export_csv(f"{args.out_prefix}_tfidf.csv", rows, fieldnames=['metric','value'])
+
+    # per-file TF-IDF matrix and heatmap
+    try:
+        files_a, mat_a = compute_pairwise_tfidf_matrix(paths_a)
+        files_b, mat_b = compute_pairwise_tfidf_matrix(paths_b)
+        # save CSVs
+        import csv
+        if mat_a is not None:
+            with open(f'{args.out_prefix}_tfidf_matrix_a.csv', 'w', encoding='utf-8', newline='') as f:
+                w = csv.writer(f)
+                w.writerow(['file'] + files_a)
+                for i, row in enumerate(mat_a):
+                    w.writerow([files_a[i]] + list(row))
+        if mat_b is not None:
+            with open(f'{args.out_prefix}_tfidf_matrix_b.csv', 'w', encoding='utf-8', newline='') as f:
+                w = csv.writer(f)
+                w.writerow(['file'] + files_b)
+                for i, row in enumerate(mat_b):
+                    w.writerow([files_b[i]] + list(row))
+        # combined heatmap for cross-author (if both present)
+        if mat_a is not None and mat_b is not None:
+            # compute cross similarity between A-files and B-files via TF-IDF over all docs
+            import numpy as np
+            docs_all = []
+            files_all = []
+            for p in paths_a:
+                if os.path.isdir(p):
+                    for root, _, fns in os.walk(p):
+                        for fn in fns:
+                            if fn.lower().endswith('.txt'):
+                                fp = os.path.join(root, fn)
+                                with open(fp, 'r', encoding='utf-8') as f:
+                                    docs_all.append(f.read())
+                                files_all.append(os.path.relpath(fp))
+            for p in paths_b:
+                if os.path.isdir(p):
+                    for root, _, fns in os.walk(p):
+                        for fn in fns:
+                            if fn.lower().endswith('.txt'):
+                                fp = os.path.join(root, fn)
+                                with open(fp, 'r', encoding='utf-8') as f:
+                                    docs_all.append(f.read())
+                                files_all.append(os.path.relpath(fp))
+            if docs_all and TfidfVectorizer:
+                vec = TfidfVectorizer(stop_words='english')
+                X = vec.fit_transform(docs_all)
+                na = len(files_a)
+                nb = len(files_b)
+                cross = cosine_similarity(X[:na], X[na:na+nb])
+                plt.figure(figsize=(10,8))
+                sns.heatmap(cross, xticklabels=files_b, yticklabels=files_a, cmap='viridis')
+                plt.title('TF-IDF cross-similarity A vs B')
+                plt.tight_layout(); plt.savefig(f'{args.out_prefix}_tfidf_cross_heatmap.png'); plt.close()
+    except Exception:
+        pass
+
+    # generate multiple n-gram plots per-file (up to sample-files)
+    try:
+        plot_multiple_ngrams_for_author(paths_a, args.sample_files, args.out_prefix, 'A')
+        plot_multiple_ngrams_for_author(paths_b, args.sample_files, args.out_prefix, 'B')
+        plot_combined_ngrams(paths_a, paths_b, args.sample_files, args.out_prefix)
+        plot_single_figure_both_authors(paths_a, paths_b, args.sample_files, args.out_prefix)
+    except Exception:
+        pass
+
+    # per-file embeddings and heatmaps
+    try:
+        files_a_e, embs_a = compute_per_file_embeddings(paths_a)
+        files_b_e, embs_b = compute_per_file_embeddings(paths_b)
+        import numpy as np
+        if embs_a is not None:
+            # save embeddings
+            np.savetxt(f'{args.out_prefix}_embeddings_a.csv', embs_a, delimiter=',')
+        if embs_b is not None:
+            np.savetxt(f'{args.out_prefix}_embeddings_b.csv', embs_b, delimiter=',')
+        if embs_a is not None and embs_b is not None:
+            cross = cosine_similarity(embs_a, embs_b)
+            # save cross matrix
+            import pandas as pd
+            df = pd.DataFrame(cross, index=files_a_e, columns=files_b_e)
+            df.to_csv(f'{args.out_prefix}_emb_cross.csv')
+            plt.figure(figsize=(10,8))
+            sns.heatmap(df, cmap='magma')
+            plt.title('Embedding cross-similarity A vs B')
+            plt.tight_layout(); plt.savefig(f'{args.out_prefix}_emb_cross_heatmap.png'); plt.close()
+    except Exception:
+        pass
 
     # print extended summary
     print('\nTop 10 trigrams A:\n', ngrams_a[:10])
@@ -743,6 +1173,38 @@ def main():
     # generate additional plots
     try:
         plot_additional(stats_a, stats_b, texts_a, texts_b, per_a, per_b, tfidf, ngrams_a, ngrams_b, args.out_prefix)
+    except Exception:
+        pass
+
+    # topic modelling
+    try:
+        tm_a = build_topic_model(texts_a, num_topics=6)
+        tm_b = build_topic_model(texts_b, num_topics=6)
+        import json
+        with open(f'{args.out_prefix}_topics_a.json', 'w', encoding='utf-8') as f:
+            json.dump({'topics': tm_a['topics'] if tm_a else []}, f, ensure_ascii=False, indent=2)
+        with open(f'{args.out_prefix}_topics_b.json', 'w', encoding='utf-8') as f:
+            json.dump({'topics': tm_b['topics'] if tm_b else []}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+    # classifier
+    try:
+        clf_res = train_classifier(paths_a, paths_b, args.out_prefix)
+    except Exception:
+        clf_res = None
+
+    # fingerprint and radar
+    try:
+        fp_a = build_fingerprint(stats_a)
+        fp_b = build_fingerprint(stats_b)
+        labels = list(fp_a.keys())
+        plot_radar(fp_a, fp_b, labels, f'{args.out_prefix}_fingerprint_radar.png')
+        import json
+        with open(f'{args.out_prefix}_fingerprint_a.json','w',encoding='utf-8') as f:
+            json.dump(fp_a,f,ensure_ascii=False,indent=2)
+        with open(f'{args.out_prefix}_fingerprint_b.json','w',encoding='utf-8') as f:
+            json.dump(fp_b,f,ensure_ascii=False,indent=2)
     except Exception:
         pass
 
