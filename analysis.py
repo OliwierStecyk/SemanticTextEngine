@@ -138,13 +138,18 @@ def clean_and_analyze_lyrics(artist_slug: str):
     return all_songs_data
 
 
-# WYKRESY
+# WYKRESY (OSOBNE OKNA I PLIKI)
 def plot_artist_battle(data1, data2, name1, name2):
     sns.set_theme(style="whitegrid")
+    current_dir = os.path.dirname(os.path.abspath(__file__))
 
-    fig, axes = plt.subplots(5, 2, figsize=(22, 10))
-    fig.suptitle(f"BITWA ANALITYCZNA: {name1.upper()} vs {name2.upper()}", fontsize=22, weight='bold', y=0.98)
+    battle_folder_name = f"{name1}_vs_{name2}"
+    output_dir = os.path.join(current_dir, 'results', battle_folder_name)
 
+    os.makedirs(output_dir, exist_ok=True)
+
+    logging.info(f"Zapisuję wykresy w katalogu wynikowym: {output_dir}")
+    # Przygotowanie danych zbiorczych do wykresów pudełkowych
     rows = []
     for d in data1: rows.append(
         {"Artysta": name1, "Słowa": d["total_words"], "DłSłowa": d["avg_word_len"], "DłWersu": d["avg_line_len"],
@@ -154,23 +159,35 @@ def plot_artist_battle(data1, data2, name1, name2):
          "TTR": len(set(d["lemmas"])) / d["total_words"] if d["total_words"] else 0})
     df_box = pd.DataFrame(rows)
 
-    # --- WYKRES 1: Liczba słów w utworze ---
-    sns.boxplot(x="Artysta", y="Słowa", data=df_box, ax=axes[0, 0], palette="Set2")
-    axes[0, 0].set_title("1. Rozkład liczby słów w piosenkach", fontsize=12, weight='bold')
+    # --- WYKRES 1: Liczba słów ---
+    plt.figure(figsize=(8, 5))
+    # Dodane hue="Artysta" oraz legend=False
+    sns.boxplot(x="Artysta", y="Słowa", data=df_box, hue="Artysta", palette="Set2", legend=False)
+    plt.title(f"Rozkład liczby słów w piosenkach: {name1.upper()} vs {name2.upper()}", fontsize=12, weight='bold')
+    plt.savefig(os.path.join(output_dir, "wykres_1_liczba_slow.png"), bbox_inches="tight", dpi=150)
 
     # --- WYKRES 2: Bogactwo językowe (TTR) ---
-    sns.boxplot(x="Artysta", y="TTR", data=df_box, ax=axes[0, 1], palette="Set2")
-    axes[0, 1].set_title("2. Bogactwo językowe (Type-Token Ratio)", fontsize=12, weight='bold')
+    plt.figure(figsize=(8, 5))
+    # Dodane hue="Artysta" oraz legend=False
+    sns.boxplot(x="Artysta", y="TTR", data=df_box, hue="Artysta", palette="Set2", legend=False)
+    plt.title("Bogactwo językowe (Type-Token Ratio)", fontsize=12, weight='bold')
+    plt.savefig(os.path.join(output_dir, "wykres_2_ttr.png"), bbox_inches="tight", dpi=150)
 
     # --- WYKRES 3: Średnia długość słowa ---
-    sns.boxplot(x="Artysta", y="DłSłowa", data=df_box, ax=axes[1, 0], palette="Set2")
-    axes[1, 0].set_title("3. Średnia długość słowa (liczba liter)", fontsize=12, weight='bold')
+    plt.figure(figsize=(8, 5))
+    # Dodane hue="Artysta" oraz legend=False
+    sns.boxplot(x="Artysta", y="DłSłowa", data=df_box, hue="Artysta", palette="Set2", legend=False)
+    plt.title("Średnia długość słowa (liczba liter)", fontsize=12, weight='bold')
+    plt.savefig(os.path.join(output_dir, "wykres_3_dlugosc_slowa.png"), bbox_inches="tight", dpi=150)
 
     # --- WYKRES 4: Średnia długość wersu ---
-    sns.boxplot(x="Artysta", y="DłWersu", data=df_box, ax=axes[1, 1], palette="Set2")
-    axes[1, 1].set_title("4. Średnia długość wersu (liczba słów)", fontsize=12, weight='bold')
+    plt.figure(figsize=(8, 5))
+    # Dodane hue="Artysta" oraz legend=False
+    sns.boxplot(x="Artysta", y="DłWersu", data=df_box, hue="Artysta", palette="Set2", legend=False)
+    plt.title("Średnia długość wersu (liczba słów)", fontsize=12, weight='bold')
+    plt.savefig(os.path.join(output_dir, "wykres_4_dlugosc_wersu.png"), bbox_inches="tight", dpi=150)
 
-    # Przygotowanie statystyk części mowy (POS)
+    # --- WYKRES 5: Profil części mowy (Gramatyka) ---
     pos_rows = []
     for d, name in [(data1, name1), (data2, name2)]:
         for item in d:
@@ -183,73 +200,56 @@ def plot_artist_battle(data1, data2, name1, name2):
             pos_rows.append({"Artysta": name, "Część mowy": "Przymiotniki %", "Wartość": (a / t) * 100})
     df_pos = pd.DataFrame(pos_rows)
 
-    # --- WYKRESY 5, 6, 7: Struktura stylu (Gramatyka) ---
-    sns.barplot(x="Część mowy", y="Wartość", hue="Artysta", data=df_pos, ax=axes[2, 0], palette="Set2")
-    axes[2, 0].set_title("5, 6, 7. Porównanie profilu części mowy (%)", fontsize=12, weight='bold')
-    axes[2, 0].set_ylabel("Udział procentowy w tekście")
+    plt.figure(figsize=(9, 5))
+    sns.barplot(x="Część mowy", y="Wartość", hue="Artysta", data=df_pos, palette="Set2")
+    plt.title("Porównanie profilu części mowy (%)", fontsize=12, weight='bold')
+    plt.ylabel("Udział procentowy w tekście")
+    plt.savefig(os.path.join(output_dir, "wykres_5_czesci_mowy.png"), bbox_inches="tight", dpi=150)
 
-    # --- WYKRES 8: Zmiana objętości tekstów w czasie (Trendy) ---
+    # --- WYKRES 6: Zmiana objętości tekstów w czasie ---
     years_data = []
     for d, name in [(data1, name1), (data2, name2)]:
         for item in d:
             if item["year"]:
                 years_data.append({"Artysta": name, "Rok": item["year"], "Słowa": item["total_words"]})
     if years_data:
+        plt.figure(figsize=(10, 5))
         df_years = pd.DataFrame(years_data).groupby(["Artysta", "Rok"]).mean().reset_index()
-        sns.lineplot(x="Rok", y="Słowa", hue="Artysta", marker="o", data=df_years, ax=axes[2, 1], palette="Set2")
-        axes[2, 1].set_title("8. Średnia liczba słów na przestrzeni lat", fontsize=12, weight='bold')
-    else:
-        axes[2, 1].text(0.5, 0.5, "Brak danych o rocznikach piosenek", ha="center", va="center")
-        axes[2, 1].set_title("8. Średnia liczba słów na przestrzeni lat (Brak danych)", fontsize=12, weight='bold')
+        sns.lineplot(x="Rok", y="Słowa", hue="Artysta", marker="o", data=df_years, palette="Set2")
+        plt.title("Średnia liczba słów na przestrzeni lat", fontsize=12, weight='bold')
+        plt.savefig(os.path.join(output_dir, "wykres_6_trendy_czas.png"), bbox_inches="tight", dpi=150)
 
-    # Przygotowanie najczęstszych słów i trigramów
+    # --- WYKRES 7: Najczęstsze pojedyncze słowa ---
     all_lemmas1 = [l for d in data1 for l in d["lemmas"]]
     all_lemmas2 = [l for d in data2 for l in d["lemmas"]]
-
     words_c1 = Counter(all_lemmas1).most_common(3)
     words_c2 = Counter(all_lemmas2).most_common(3)
-
     df_words = pd.DataFrame(
         [{"Artysta": name1, "Słowo": w, "Liczba": c} for w, c in words_c1] +
         [{"Artysta": name2, "Słowo": w, "Liczba": c} for w, c in words_c2]
     )
+    plt.figure(figsize=(9, 5))
+    sns.barplot(x="Liczba", y="Słowo", hue="Artysta", data=df_words, palette="Set2")
+    plt.title("Najpopularniejsze słowa-klucze (Top 3)", fontsize=12, weight='bold')
+    plt.savefig(os.path.join(output_dir, "wykres_7_slowa_klucze.png"), bbox_inches="tight", dpi=150)
 
-    # --- WYKRES 9: Najczęstsze pojedyncze słowa ---
-    sns.barplot(x="Liczba", y="Słowo", hue="Artysta", data=df_words, ax=axes[3, 0], palette="Set2")
-    axes[3, 0].set_title("9. Najpopularniejsze słowa-klucze (Top 3)", fontsize=12, weight='bold')
-
-    # Trigramy (3 wyrazy) przy użyciu NLTK
+    # --- WYKRES 8: Najczęstsze frazy 3-wyrazowe (Trigramy) ---
     tg1 = [" ".join(gram) for gram in ngrams(all_lemmas1, 3)] if len(all_lemmas1) >= 3 else []
     tg2 = [" ".join(gram) for gram in ngrams(all_lemmas2, 3)] if len(all_lemmas2) >= 3 else []
-
     tg_c1 = Counter(tg1).most_common(3)
     tg_c2 = Counter(tg2).most_common(3)
-
     df_tg = pd.DataFrame(
         [{"Artysta": name1, "Fraza (3 słowa)": tg, "Liczba": c} for tg, c in tg_c1] +
         [{"Artysta": name2, "Fraza (3 słowa)": tg, "Liczba": c} for tg, c in tg_c2]
     )
+    plt.figure(figsize=(11, 5))
+    sns.barplot(x="Liczba", y="Fraza (3 słowa)", hue="Artysta", data=df_tg, palette="Set2")
+    plt.title("Najczęstsze frazy 3-wyrazowe (Trigramy)", fontsize=12, weight='bold')
+    plt.savefig(os.path.join(output_dir, "wykres_8_trigramy.png"), bbox_inches="tight", dpi=150)
 
-    # --- WYKRES 10: Najczęstsze frazy 3-wyrazowe ---
-    sns.barplot(x="Liczba", y="Fraza (3 słowa)", hue="Artysta", data=df_tg, ax=axes[3, 1], palette="Set2")
-    axes[3, 1].set_title("10. Najczęstsze frazy 3-wyrazowe (Trigramy)", fontsize=12, weight='bold')
-
-    # Usunięcie pustego piątego wiersza (ponieważ użyliśmy 10 wykresów w siatce 5x2, idealnie zagospodarowaliśmy przestrzeń,
-    # ale na wszelki wypadek, jeśli chcemy dodać podsumowanie tekstowe, wykorzystajmy ostatni wiersz axes[4,0] i axes[4,1])
-    for ax in [axes[4, 0], axes[4, 1]]:
-        ax.axis('off')
-
-    # Wstawiamy krótkie podsumowanie tekstowe bezpośrednio na dole okna
-    axes[4, 0].text(0.0, 0.5,
-                    f"Wnioski stylistyczne:\n- Wyższy wskaźnik TTR oznacza bogatszy słownik.\n- Większy % czasowników cechuje teksty dynamiczne.\n- Średnia długość słowa wskazuje na stopień skomplikowania języka.",
-                    fontsize=12, va="center")
-
-    plt.tight_layout()
-    # Zapisujemy całą wielką figurę jako jeden plik graficzny
-    output_path = os.path.join(os.path.dirname(__file__), "wyniki.png")
-    plt.savefig(output_path, bbox_inches="tight", dpi=150)
-    logging.info(f"Wykres zbiorczy został zapisany w: {output_path}")
+    logging.info(f"Wszystkie osobne wykresy zostały zapisane w folderze skryptu.")
     plt.show()
+
 
 #MAIN
 if __name__ == "__main__":
